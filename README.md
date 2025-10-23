@@ -1,6 +1,6 @@
 # Error Analyzer for C++ Compiler
 
-A tool that analyzes and categorizes error messages produced by C++ compilers, helping developers filter warning noise and focus on critical compilation errors.
+A tool that analyzes and categorizes error messages produced by C++ compilers, helping developers filter warning noise and focus on critical compilation errors. Ignoring warnings isn't ideal programming practice, but often it's not possible to fix someone else's legacy code.
 
 ## The Problem
 
@@ -35,10 +35,10 @@ This tool:
 ```
 
 ### Method 2: As a Compiler Wrapper (Recommended)
-Set the `CXX` environment variable with your compiler and run your build as usual.:
+Use cmake CMAKE_CXX_COMPILER_LAUNCHER option.
 
 ```bash
-CXX="/path/to/quietcc.py g++" cmake ..
+cmake .. -DCMAKE_CXX_COMPILER_LAUNCHER=/path/to/quietcc.py
 cmake --build .
 # or
 ninja

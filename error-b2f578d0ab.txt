@@ -1,0 +1,83 @@
+Command:
+g++ -c template_error_example.cpp
+
+==================== Filtered Compiler Output (First Error + Context) ====================
+template_error_example.cpp:19:40: error: static assertion failed: Type must have serialize() method
+   19 |         static_assert(HasSerialize<T>::value, "Type must have serialize() method");
+      |                                        ^~~~~
+template_error_example.cpp:19:40: note: ‘HasSerialize<MyData>::value’ evaluates to false
+template_error_example.cpp: In instantiation of ‘static void Serializer<T, Enable>::serialize(const T&) [with T = double; Enable = void]’:
+template_error_example.cpp:49:33:   required from ‘void TripleContainer<T, U, V>::serializeAll() [with T = std::vector<int>; U = MyData; V = double]’
+template_error_example.cpp:62:27:   required from here
+template_error_example.cpp:19:40: error: static assertion failed: Type must have serialize() method
+template_error_example.cpp:19:40: note: ‘HasSerialize<double>::value’ evaluates to false
+
+==================== Relevant Source Code Snippets (From All Errors) ====================
+
+--- Snippet for error at: template_error_example.cpp:19 ---
+    Error Message: template_error_example.cpp:19:40: error: static assertion failed: Type must have serialize() method
+        1: #include <iostream>
+        2: #include <vector>
+        3: #include <type_traits>
+        4: 
+        5: template<typename T>
+        6: struct HasSerialize {
+        7:     template<typename U>
+        8:     static auto test(int) -> decltype(std::declval<U>().serialize(), std::true_type{});
+        9: 
+       10:     template<typename>
+       11:     static std::false_type test(...);
+       12: 
+       13:     static constexpr bool value = decltype(test<T>(0))::value;
+       14: };
+       15: 
+       16: template<typename T, typename Enable = void>
+       17: struct Serializer {
+       18:     static void serialize(const T& obj) {
+  >>   19:         static_assert(HasSerialize<T>::value, "Type must have serialize() method");
+       20:     }
+       21: };
+       22: 
+       23: template<typename Container>
+       24: struct Serializer<Container, typename std::enable_if<
+       25:     std::is_same<typename Container::value_type, int>::value
+       26: >::type> {
+       27:     static void serialize(const Container& container) {
+       28:         for (const auto& item : container) {
+       29:             std::cout << item << " ";
+       30:         }
+       31:     }
+       32: };
+       33: 
+       34: struct MyData {
+       35:     int x;
+       36:     double y;
+       37:     std::string name;
+       38: };
+       39: 
+       40: template<typename T, typename U, typename V>
+       41: struct TripleContainer {
+       42:     T first;
+       43:     U second;
+       44:     V third;
+       45: 
+       46:     void serializeAll() {
+       47:         Serializer<T>::serialize(first);
+       48:         Serializer<U>::serialize(second);
+       49:         Serializer<V>::serialize(third);
+       50:     }
+       51: };
+       52: 
+       53: int main() {
+       54:     std::vector<int> vec = {1, 2, 3};
+       55:     MyData data{10, 3.14, "test"};
+       56: 
+       57:     TripleContainer<std::vector<int>, MyData, double> container;
+       58:     container.first = vec;
+       59:     container.second = data;
+       60:     container.third = 2.718;
+       61: 
+       62:     container.serializeAll();  // ERROR: MyData and double don't have serialize()
+       63: 
+       64:     return 0;
+       65: }

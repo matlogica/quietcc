@@ -99,6 +99,17 @@ You can customize the tool by editing these variables in `quietcc.py`:
 - `ERROR_REPORT_DIR` (default: ".") - Directory for error report files
 - `DEFAULT_COMPILER` (default: "g++") - Compiler to use in wrapper mode
 
+## Warnings as Errors
+
+To treat all warnings as errors, enable the following option in your CMake configuration:
+
+```cmake
+    set(CMAKE_COMPILE_WARNING_AS_ERROR ON) # globally
+    set_target_properties(test_core PROPERTIES COMPILE_WARNING_AS_ERROR ON) # per-target
+```
+
+The tool will then capture warnings as errors in the reports.
+
 ## License
 
 This tool is provided as-is for developer use.

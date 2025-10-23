@@ -204,6 +204,10 @@ if __name__ == "__main__":
                 print("========================================", file=sys.stderr)
                 print(f"Compilation failed (exit code {process.returncode}).", file=sys.stderr)
                 print(f"  Report: {full_report_path}", file=sys.stderr)
+                # first error location:
+                if error_locations:
+                    first_error = error_locations[0]
+                    print(f"  First Error Location: {first_error[0]}:{first_error[1]}", file=sys.stderr)
                 if source_files_in_command:
                     print(f"  Source(s) in Command: {', '.join(source_files_in_command)}", file=sys.stderr)
                 print(f"  Errors Found (file:line:error pattern): {num_errors}", file=sys.stderr)

@@ -127,6 +127,16 @@ if __name__ == "__main__":
     for arg in compiler_args:
         if isinstance(arg, str) and arg.lower().endswith(source_extensions) and not arg.startswith('-'):
              source_files_in_command.append(os.path.abspath(arg))
+    binary_files_in_command = []
+    binary_extensions = ('.o', '.obj')
+    for arg in compiler_args:
+        if isinstance(arg, str) and arg.lower().endswith(binary_extensions) and not arg.startswith('-'):
+                binary_files_in_command.append(os.path.abspath(arg))
+    # unique binary_extensions
+    binary_files_in_command = list(set(binary_files_in_command))
+    cwd = os.getcwd()
+    # remove cwd from binary_files_in_command for display
+    binary_files_in_command = [os.path.relpath(f, cwd) for f in binary_files_in_command]
 
     try:
         process = subprocess.run(
@@ -210,6 +220,8 @@ if __name__ == "__main__":
                     print(f"  First Error Location: {first_error[0]}:{first_error[1]}", file=sys.stderr)
                 if source_files_in_command:
                     print(f"  Source(s) in Command: {', '.join(source_files_in_command)}", file=sys.stderr)
+                if binary_files_in_command:
+                    print(f"  Binary(s) in Command: {', '.join(binary_files_in_command)}", file=sys.stderr)
                 print(f"  Errors Found (file:line:error pattern): {num_errors}", file=sys.stderr)
                 print("========================================", file=sys.stderr)
 
@@ -222,6 +234,8 @@ if __name__ == "__main__":
                 print(f"  Attempted Report: {full_report_path}", file=sys.stderr)
                 if source_files_in_command:
                    print(f"  Source(s) in Command: {', '.join(source_files_in_command)}", file=sys.stderr)
+                if binary_files_in_command:
+                   print(f"  Binary(s) in Command: {', '.join(binary_files_in_command)}", file=sys.stderr)
                 print(f"  Errors Found (file:line:error pattern): {num_errors}", file=sys.stderr)
                 print(f"  ERROR WRITING REPORT FILE: {write_e}", file=sys.stderr)
                 print("========================================", file=sys.stderr)

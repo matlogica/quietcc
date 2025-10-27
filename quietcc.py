@@ -1,107 +1,458 @@
 #!/usr/bin/env python3
 
+"""
+C++ Compiler Error Message Parser
+
+Parses error messages from MSVC, GCC, and Clang compilers.
+Extracts error locations, messages, and trigger locations (call stacks).
+"""
+
+import re
+from dataclasses import dataclass, field
+from typing import List, Optional
+from enum import Enum
 import sys
 import subprocess
-import re
 import os
 import uuid
 import shlex
+import platform
 
-# --- Configuration ---
-CONTEXT_LINES = 50 # For source code snippets
-ERROR_CONTEXT_LINES = 40 # Lines *after* the first error line in compiler output
 ERROR_REPORT_DIR = "." # Directory to save error reports
+SNIP_RADIUS = 25
+NUM_ERROR_PRE_LINES = 3
+NUM_ERROR_POST_LINES = 6
+
 
 # Default compiler - you can change this to your preferred compiler
-DEFAULT_COMPILER = "g++"
+# Detects platform: 'cl' for Windows, 'g++' for Unix-like systems
+DEFAULT_COMPILER = "cl" if platform.system() == "Windows" else "g++"
 
-# --- Helper Functions ---
-def find_error_locations(text):
+class CompilerType(Enum):
+    """Supported compiler types"""
+    MSVC = "msvc"
+    GCC = "gcc"
+    CLANG = "clang"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class Location:
+    """Represents a source code location"""
+    file_path: str
+    line_number: int
+    error_line: int # line number in compiler output where this location was found
+    
+    def __repr__(self):
+        return f"{self.file_path}:{self.line_number} @ ({self.error_line})"
+
+
+@dataclass
+class Error:
+    """Represents a compiler error with its locations"""
+    message: str
+    error_location: Location
+    trigger_locations: List[Location] = field(default_factory=list)
+    
+    def __repr__(self):
+        triggers = " -> ".join(str(loc) for loc in self.trigger_locations)
+        if triggers:
+            return f"Error at {self.error_location}: {self.message}\n  Trigger chain: {triggers}"
+        return f"Error at {self.error_location}: {self.message}"
+
+
+class CompilerErrorParser:
+    """Parser for C++ compiler error messages"""
+    
+    # MSVC patterns
+    MSVC_ERROR_PATTERN = re.compile(
+        r'^(.+?)\((\d+)\):\s*(?:error)\s+[A-Z]\d+:\s*(.+)$',
+        re.MULTILINE
+    )
+    MSVC_NOTE_PATTERN = re.compile(
+        r'^(.+?)\((\d+)\):\s*note:\s*(.+)$',
+        re.MULTILINE
+    )
+    
+    # GCC patterns
+    GCC_ERROR_PATTERN = re.compile(
+        r'^(.+?):(\d+):(?:\d+:)?\s*(?:error):\s*(.+?)(?:\s*\[.*?\])?$',
+        re.MULTILINE
+    )
+    GCC_NOTE_PATTERN = re.compile(
+        r'^(.+?):(\d+):(?:\d+:)?\s*note:\s*(.+)$',
+        re.MULTILINE
+    )
+    GCC_CONTEXT_PATTERN = re.compile(
+        r'^(.+?):\s*In (?:instantiation|function|member function|expansion)\s+(?:of|from)\s+',
+        re.MULTILINE
+    )
+    
+    # Clang patterns
+    CLANG_ERROR_PATTERN = re.compile(
+        r'^(.+?):(\d+):(?:\d+:)?\s*(?:error):\s*(.+)$',
+        re.MULTILINE
+    )
+    CLANG_NOTE_PATTERN = re.compile(
+        r'^(.+?):(\d+):(?:\d+:)?\s*note:\s*(.+)$',
+        re.MULTILINE
+    )
+    
+    def __init__(self):
+        self.errors: List[Error] = []
+        self.compiler_type: CompilerType = CompilerType.UNKNOWN
+    
+    def detect_compiler(self, output: str) -> CompilerType:
+        """Detect which compiler generated the output"""
+        if "Microsoft (R) C/C++ Optimizing Compiler" in output:
+            return CompilerType.MSVC
+        elif "error generated" in output or "errors generated" in output:
+            return CompilerType.CLANG
+        elif "cc1plus:" in output or output.count(": note:") > 0:
+            # GCC often has cc1plus messages or lots of notes
+            return CompilerType.GCC
+        return CompilerType.UNKNOWN
+    
+    def parse(self, compiler_output: str) -> List[Error]:
+        """
+        Parse compiler output and return list of errors.
+        
+        Args:
+            compiler_output: Raw compiler output string
+            
+        Returns:
+            List of Error objects
+        """
+        self.errors = []
+        self.compiler_type = self.detect_compiler(compiler_output)
+        
+        if self.compiler_type == CompilerType.MSVC:
+            self._parse_msvc(compiler_output)
+        elif self.compiler_type == CompilerType.GCC:
+            self._parse_gcc(compiler_output)
+        elif self.compiler_type == CompilerType.CLANG:
+            self._parse_clang(compiler_output)
+        else:
+            # Try all parsers
+            self._parse_msvc(compiler_output)
+            if not self.errors:
+                self._parse_gcc(compiler_output)
+            if not self.errors:
+                self._parse_clang(compiler_output)
+        
+        return self.errors
+    
+    def _parse_msvc(self, output: str) -> None:
+        """Parse MSVC compiler output"""
+        lines = output.split('\n')
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Check for error line
+            error_match = self.MSVC_ERROR_PATTERN.match(line)
+            if error_match:
+                file_path = error_match.group(1)
+                line_number = int(error_match.group(2))
+                message = error_match.group(3)
+                
+                error_location = Location(file_path, line_number, i)
+                trigger_locations = []
+                
+                # Look ahead for notes that provide context
+                j = i + 1
+                while j < len(lines):
+                    note_line = lines[j].strip()
+                    note_match = self.MSVC_NOTE_PATTERN.match(note_line)
+                    
+                    if note_match:
+                        note_file = note_match.group(1)
+                        note_line_num = int(note_match.group(2))
+                        note_text = note_match.group(3)
+                        
+                        # Add notes as trigger locations
+                        # MSVC shows instantiation context from oldest to newest
+                        trigger_locations.append(Location(note_file, note_line_num, j))
+                        j += 1
+                    elif self.MSVC_ERROR_PATTERN.match(note_line):
+                        # Hit next error, stop
+                        break
+                    else:
+                        j += 1
+                        # Continue looking for notes within a reasonable distance
+                        if j - i > 30:
+                            break
+                
+                self.errors.append(Error(
+                    message=message,
+                    error_location=error_location,
+                    trigger_locations=trigger_locations
+                ))
+                i = j
+                continue
+            
+            i += 1
+    
+    def _parse_gcc(self, output: str) -> None:
+        """Parse GCC compiler output"""
+        lines = output.split('\n')
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Check for error line
+            error_match = self.GCC_ERROR_PATTERN.match(line)
+            if error_match:
+                file_path = error_match.group(1)
+                line_number = int(error_match.group(2))
+                message = error_match.group(3)
+                
+                error_location = Location(file_path, line_number, i)
+                trigger_locations = []
+                
+                # Look BACKWARD for instantiation context lines
+                # GCC prints "required from" lines before the error
+                j = i - 1
+                context_lines = []
+                while j >= 0 and j >= i - 30:
+                    prev_line = lines[j].strip()
+                    
+                    # Check if this line contains instantiation context
+                    # Match both "required from" and other location patterns
+                    req_match = re.match(r'^(.+?):(\d+):\d+:\s+required from', prev_line)
+                    if req_match:
+                        context_lines.insert(0, Location(
+                            req_match.group(1),
+                            int(req_match.group(2)),
+                            j
+                        ))
+                    elif 'In instantiation of' in prev_line or 'In function' in prev_line:
+                        # This marks the start of the instantiation chain
+                        break
+                    
+                    j -= 1
+                
+                trigger_locations.extend(context_lines)
+                
+                # Look ahead for notes and additional context
+                j = i + 1
+                while j < len(lines):
+                    note_line = lines[j].strip()
+                    
+                    # Check for note lines that provide instantiation context
+                    note_match = self.GCC_NOTE_PATTERN.match(note_line)
+                    if note_match:
+                        note_file = note_match.group(1)
+                        note_line_num = int(note_match.group(2))
+                        note_text = note_match.group(3)
+                        
+                        # GCC notes show various contexts:
+                        # - "required from" chains (template instantiation)
+                        # - "in expansion of" (macro expansion)
+                        # - "in definition of macro" (macro definition location)
+                        if ("required from" in note_text or 
+                            "in expansion of" in note_text or
+                            "in definition of macro" in note_text):
+                            trigger_locations.append(Location(note_file, note_line_num, j))
+                        
+                        j += 1
+                    elif self.GCC_ERROR_PATTERN.match(note_line):
+                        # Hit next error, stop
+                        break
+                    else:
+                        j += 1
+                        if j - i > 30:
+                            break
+                
+                self.errors.append(Error(
+                    message=message,
+                    error_location=error_location,
+                    trigger_locations=trigger_locations
+                ))
+                i = j
+                continue
+            
+            i += 1
+    
+    def _parse_clang(self, output: str) -> None:
+        """Parse Clang compiler output"""
+        lines = output.split('\n')
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Check for error line
+            error_match = self.CLANG_ERROR_PATTERN.match(line)
+            if error_match:
+                file_path = error_match.group(1)
+                line_number = int(error_match.group(2))
+                message = error_match.group(3)
+                
+                error_location = Location(file_path, line_number, i)
+                trigger_locations = []
+                
+                # Look ahead for notes
+                j = i + 1
+                while j < len(lines):
+                    note_line = lines[j].strip()
+                    note_match = self.CLANG_NOTE_PATTERN.match(note_line)
+                    
+                    if note_match:
+                        note_file = note_match.group(1)
+                        note_line_num = int(note_match.group(2))
+                        note_text = note_match.group(3)
+                        
+                        # Clang notes show instantiation/expansion chain
+                        if ("in instantiation" in note_text or 
+                            "expanded from" in note_text or
+                            "requested here" in note_text):
+                            trigger_locations.append(Location(note_file, note_line_num, j))
+                        
+                        j += 1
+                    elif self.CLANG_ERROR_PATTERN.match(note_line):
+                        # Hit next error, stop
+                        break
+                    else:
+                        j += 1
+                        if j - i > 30:
+                            break
+                
+                self.errors.append(Error(
+                    message=message,
+                    error_location=error_location,
+                    trigger_locations=trigger_locations
+                ))
+                i = j
+                continue
+            
+            i += 1
+
+
+def parse_compiler_errors(compiler_output: str) -> List[Error]:
     """
-    Parses compiler output text to find file paths, line numbers, and error messages.
-    Returns a list of tuples: (filepath, line_number, error_line_text)
+    Convenience function to parse compiler errors.
+    
+    Args:
+        compiler_output: Raw compiler output string
+        
+    Returns:
+        List of Error objects
     """
-    error_pattern = re.compile(r"^((?:[a-zA-Z]:\\|\.\.?[/\\])?[^:\n]+?):(\d+):(?:(?:\d+:)?\s*(?:fatal\s+)?error:\s*.*)$", re.MULTILINE)
-    locations = []
-    unique_locs = set()
+    parser = CompilerErrorParser()
+    return parser.parse(compiler_output)
 
-    for match in error_pattern.finditer(text):
-        filepath = match.group(1).strip()
-        try:
-            line_num = int(match.group(2))
-            error_line = match.group(0).strip()
-            abs_filepath = os.path.abspath(filepath)
-            loc_key = (abs_filepath, line_num) # Use tuple of (abs_path, line_num) for uniqueness
-            if loc_key not in unique_locs:
-                 # Store original path for display, line number, and the error line itself
-                 locations.append((filepath, line_num, error_line)) 
-                 unique_locs.add(loc_key)
-        except ValueError:
-            continue
-        except Exception as e:
-            print(f"Error processing match '{match.group(0)}': {e}", file=sys.stderr)
-    return locations
 
-def read_code_snippet(filepath, line_number, context=CONTEXT_LINES):
-    """
-    Reads source code file and extracts lines around the specified line number.
-    Returns a formatted string of the code snippet or an error message.
-    """
-    try:
-        abs_filepath = os.path.abspath(filepath)
-        if not os.path.exists(abs_filepath):
-            return f"    <File not found: {filepath} (abs: {abs_filepath})>\n"
+class TextBlockRange:
+    """Helper class to represent a range of text lines"""
+    def __init__(self, start_line: int, end_line: int):
+        self.start_line = start_line
+        self.end_line = end_line
+    
+    def __repr__(self):
+        return f"TextBlockRange({self.start_line}, {self.end_line})"
 
-        with open(abs_filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
 
-        start_line = max(0, line_number - context - 1)
-        end_line = min(len(lines), line_number + context)
+def add_text_block_range(ranges: List[TextBlockRange], TextBlock: TextBlockRange) -> List[TextBlockRange]:
+    # if TextBlock overlaps or is adjacent to any existing range, merge them
+    ranges_sorted = sorted(ranges + [TextBlock], key=lambda r: r.start_line)
+    merged_ranges = []
+    current_range = ranges_sorted[0]
+    for r in ranges_sorted[1:]:
+        if r.start_line <= current_range.end_line:
+            # Overlaps or adjacent, merge
+            current_range.end_line = max(current_range.end_line, r.end_line)
+        else:
+            merged_ranges.append(current_range)
+            current_range = r
+    merged_ranges.append(current_range)
+    return merged_ranges
 
-        snippet_lines = []
-        for i in range(start_line, end_line):
-            line_num_display = i + 1
-            prefix = "  >>" if line_num_display == line_number else "    "
-            snippet_lines.append(f"{prefix}{line_num_display:>{5}}: {lines[i].rstrip()}")
+# Example usage and testing
+def generate_report(compiler_output: str):
 
-        if not snippet_lines:
-             return f"    <Could not read lines around {line_number} in {filepath}>\n"
-        return "\n".join(snippet_lines) + "\n"
-    except FileNotFoundError:
-        return f"    <File not found: {filepath} (abs: {abs_filepath})>\n"
-    except Exception as e:
-        return f"    <Error reading file {filepath}: {e}>\n"
+    compiler_output_ranges = []
 
-def filter_compiler_output(output_text, context_after_error=ERROR_CONTEXT_LINES):
-    """
-    Filters compiler output. Finds the first 'error:' line and includes
-    that line plus the next 'context_after_error' lines.
-    Lines containing 'warning:' are removed from this block.
-    If no 'error:' line is found, it keeps all non-warning lines.
-    """
-    lines = output_text.splitlines()
-    first_error_index = -1
-    for i, line in enumerate(lines):
-        if "error:" in line.lower():
-            first_error_index = i
+    source_code_blocks = {}  # map from file_path to list of TextBlockRange
+
+#    print("Merged Ranges:", merged)
+
+    errors = parse_compiler_errors(compiler_output)
+
+    for error in errors:
+        if error.error_location.file_path not in source_code_blocks:
+            source_code_blocks[error.error_location.file_path] = []
+        source_code_blocks[error.error_location.file_path] = add_text_block_range(
+            source_code_blocks[error.error_location.file_path],
+            TextBlockRange(max(0, error.error_location.line_number - SNIP_RADIUS), error.error_location.line_number + SNIP_RADIUS)
+        )
+        compiler_output_ranges = add_text_block_range(
+            compiler_output_ranges,
+            TextBlockRange(max(0, error.error_location.error_line - NUM_ERROR_PRE_LINES), error.error_location.error_line + NUM_ERROR_POST_LINES)
+        )
+        for trigger in error.trigger_locations:
+            if trigger.file_path not in source_code_blocks:
+                source_code_blocks[trigger.file_path] = []
+            source_code_blocks[trigger.file_path] = add_text_block_range(
+                source_code_blocks[trigger.file_path],
+                TextBlockRange(max(0, trigger.line_number - SNIP_RADIUS), trigger.line_number + SNIP_RADIUS)
+            )
+            compiler_output_ranges = add_text_block_range(
+                compiler_output_ranges,
+                TextBlockRange(max(0, trigger.error_line - NUM_ERROR_PRE_LINES), trigger.error_line + NUM_ERROR_POST_LINES)
+            )
+        # calc number of lines in report
+        total_report_lines = sum(r.end_line - r.start_line for r in compiler_output_ranges)
+        # calc number of lines in source code snippets
+        for file_path, ranges in source_code_blocks.items():
+            total_report_lines += sum(r.end_line - r.start_line for r in ranges)
+
+        if total_report_lines > 500:
             break
 
-    filtered_lines = []
-    if first_error_index != -1:
-        start_index = first_error_index
-        end_index = first_error_index + 1 + context_after_error
-        context_block = lines[start_index:end_index]
-        for line in context_block:
-            if "warning:" not in line.lower():
-                filtered_lines.append(line)
-    else:
-        for line in lines:
-             if "warning:" not in line.lower():
-                filtered_lines.append(line)
-    return "\n".join(filtered_lines)
+#    print(f"Total report lines: {total_report_lines}")
+
+    report_lines = []
+    output_lines = compiler_output.split('\n')
+    for r in compiler_output_ranges:
+        report_lines.extend(output_lines[r.start_line:r.end_line])
+
+    for file_path, ranges in source_code_blocks.items():
+#        print(f"Source code snippets from {file_path}:")
+        try:
+            with open(file_path, 'r') as f:
+                source_lines = f.readlines()
+                # trim
+                source_lines = [line.rstrip() for line in source_lines]
+                for r in ranges:
+                    report_lines.append(f"\n// Source code from {file_path} lines {r.start_line + 1} to {r.end_line}:\n")
+                    for line_i in range(r.start_line, r.end_line):
+                        if line_i >= len(source_lines):
+                            break
+                        line_with_number = f"{line_i + 1}: {source_lines[line_i]}"
+                        report_lines.append(line_with_number)
+                    
+        except Exception as e:
+            print(f"Could not read file {file_path}: {e}")  
+
+    return ["\n".join(report_lines), errors]
 
 
-# --- Main Execution ---
+# if __name__ == "__main__":
+#     # read from stdin
+#     import sys
+#     compiler_output = sys.stdin.read()
+#     errors = parse_compiler_errors(compiler_output)
+#     for error in errors:
+#         print(error)
+
+#     report = generate_report(compiler_output)
+
+#     print("\n=== Generated Report ===\n")
+#     print(report)
+
 
 if __name__ == "__main__":
     # Check if we're being used as a compiler wrapper (no explicit compiler specified)
@@ -184,13 +535,19 @@ if __name__ == "__main__":
         else:
             # Failure case - create detailed error report
             combined_output = process.stdout + process.stderr
-            filtered_errors = filter_compiler_output(combined_output, ERROR_CONTEXT_LINES)
-            error_locations = find_error_locations(combined_output) # Use full output
-            num_errors = len(error_locations)
 
             report_basename = f"error-{uuid.uuid4().hex[:10]}.txt"
+            if source_files_in_command:
+                # report_basename is a has of all source files
+                source_files_str = "_".join([os.path.basename(f) for f in source_files_in_command])
+                md5_hash = uuid.uuid5(uuid.NAMESPACE_DNS, source_files_str).hex[:10]
+                report_basename = f"error-{md5_hash}.txt"
+
             report_filename = os.path.join(ERROR_REPORT_DIR, report_basename)
             full_report_path = os.path.abspath(report_filename)
+
+
+            [report, errors] = generate_report(combined_output)
 
             os.makedirs(ERROR_REPORT_DIR, exist_ok=True)
 
@@ -199,35 +556,39 @@ if __name__ == "__main__":
                     safe_command_str = shlex.join(full_command)
                     report_file.write(f"Command:\n{safe_command_str}\n\n")
                     report_file.write("="*20 + " Filtered Compiler Output (First Error + Context) " + "="*20 + "\n")
-                    report_file.write(filtered_errors.strip() + "\n\n")
-
-                    if error_locations:
-                        report_file.write("="*20 + " Relevant Source Code Snippets (From All Errors) " + "="*20 + "\n")
-                        for filepath, line_num, error_line_text in error_locations:
-                            report_file.write(f"\n--- Snippet for error at: {filepath}:{line_num} ---\n")
-                            report_file.write(f"    Error Message: {error_line_text}\n")
-                            snippet = read_code_snippet(filepath, line_num, CONTEXT_LINES)
-                            report_file.write(snippet)
-                    else:
-                         report_file.write("="*20 + " No specific file:line:error patterns found in output " + "="*20 + "\n")
+                    report_file.write(report)
 
                 print("========================================", file=sys.stderr)
                 print(f"Compilation failed (exit code {process.returncode}).", file=sys.stderr)
                 print(f"  Report: {full_report_path}", file=sys.stderr)
                 # first error location:
-                if error_locations:
-                    first_error = error_locations[0]
-                    print(f"  First Error Location: {first_error[0]}:{first_error[1]}", file=sys.stderr)
+                if errors:
+                    first_error = errors[0]
+                    # print(f"  First Error Location: {first_error.error_location}:{first_error.trigger_locations}", file=sys.stderr)
+                    # # output first 4 error locations
+                    for i in range(0, min(5, len(errors))):
+#                        print(f"  Additional Error Location: {error_locations[i][0]}:{error_locations[i][1]}", file=sys.stderr)
+                        error = errors[i]
+                        first_and_last_locations_str = ""
+                        if len(error.trigger_locations) > 0:
+                            first_loc = error.trigger_locations[0]
+                            last_loc = error.trigger_locations[-1]
+                            if first_loc.file_path == last_loc.file_path and first_loc.line_number == last_loc.line_number:
+                                first_and_last_locations_str = f" -> {first_loc.file_path}:{first_loc.line_number}"
+                            else:
+                                first_and_last_locations_str = f" -> {first_loc.file_path}:{first_loc.line_number} ... {last_loc.file_path}:{last_loc.line_number}"
+
+
+                        print(f"  Error {i+1}: {errors[i].error_location.file_path}:{errors[i].error_location.line_number} {first_and_last_locations_str}", file=sys.stderr)
                 if source_files_in_command:
                     print(f"  Source(s) in Command: {', '.join(source_files_in_command)}", file=sys.stderr)
                 if binary_files_in_command:
                     print(f"  Binary(s) in Command: {', '.join(binary_files_in_command)}", file=sys.stderr)
-                print(f"  Errors Found (file:line:error pattern): {num_errors}", file=sys.stderr)
+                print(f"  Errors Found: {len(errors)}", file=sys.stderr)
                 print("========================================", file=sys.stderr)
 
-                # Don't output to console - everything is in the report
-                # Build tools will see the non-zero exit code
-
+            # print("\n=== Generated Report ===\n")
+            # print(report)
             except Exception as write_e:
                 print("========================================", file=sys.stderr)
                 print(f"Compilation failed (exit code {process.returncode}).", file=sys.stderr)
@@ -236,11 +597,12 @@ if __name__ == "__main__":
                    print(f"  Source(s) in Command: {', '.join(source_files_in_command)}", file=sys.stderr)
                 if binary_files_in_command:
                    print(f"  Binary(s) in Command: {', '.join(binary_files_in_command)}", file=sys.stderr)
-                print(f"  Errors Found (file:line:error pattern): {num_errors}", file=sys.stderr)
+                print(f"  Errors Found (file:line:error pattern): {len(errors)}", file=sys.stderr)
                 print(f"  ERROR WRITING REPORT FILE: {write_e}", file=sys.stderr)
                 print("========================================", file=sys.stderr)
 
             sys.exit(process.returncode)
+
 
     except FileNotFoundError:
         print(f"Error: Compiler '{compiler_cmd}' not found.", file=sys.stderr)

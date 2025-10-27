@@ -1,6 +1,6 @@
 # Error Analyzer for C++ Compiler
 
-A tool that analyzes and categorizes error messages produced by C++ compilers, helping developers filter warning noise and focus on critical compilation errors. Ignoring warnings isn't ideal programming practice, but often it's not possible to fix someone else's legacy code.
+A tool that analyzes and categorizes error messages produced by C++ compilers, helping developers filter warning noise and focus on critical compilation errors. Ignoring warnings isn't ideal programming practice, but often it's not possible to fix someone else's legacy code. Or be strict and [Enable Warnings as Errors](#warnings-as-errors) in your own projects to catch new issues early.
 
 ## The Problem
 
@@ -162,7 +162,7 @@ You can customize the tool by editing these variables in `quietcc.py`:
 - `ERROR_REPORT_DIR` (default: ".") - Directory for error report files
 - `DEFAULT_COMPILER` (default: "cl" on Windows, "g++" on Unix) - Compiler to use in wrapper mode
 
-## Warnings as Errors
+## Warnings as Errors 
 
 To treat all warnings as errors, enable the following option in your CMake configuration:
 
